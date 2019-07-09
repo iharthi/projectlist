@@ -10,9 +10,11 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -22,6 +24,7 @@ func main() {
 	serverNamePtr := flag.String("host", "", "Hostname to check")
 	serverPortPrt := flag.Int("port", 22, "Port ssh runs on")
 	usernamePtr := flag.String("user", "", "Username to use")
+	useHttpPtr := flag.Bool("insecure", false, "Use HTTP instead of HTTPS")
 
 	flag.Parse()
 
@@ -54,6 +57,17 @@ func main() {
 		return
 	}
 
+	serverAddrList, err := net.LookupHost(*serverNamePtr)
+	if err != nil {
+		log.Fatalf("Couldn't resolve host %s: %v", *serverNamePtr, err)
+		return
+	}
+
+	protocol := "https"
+	if *useHttpPtr {
+		protocol = "http"
+	}
+
 	sshConfig := createSshConfig(username, keyPath)
 
 	commands := make(chan string, 10)
@@ -64,12 +78,18 @@ func main() {
 	commands <- "ls /etc/nginx/sites-enabled/"
 	listString := <-results
 	list := strings.Fields(listString)
+	projects := make([]string, 0, len(list))
 
+	// Filter the list
 	for _, project := range list {
 		if project == "default" {
 			continue
 		}
+		projects = append(projects, project)
+	}
+	sort.Strings(projects)
 
+	for _, project := range projects {
 		commands <- fmt.Sprintf("cat /etc/nginx/sites-enabled/%s", project)
 		result := <-results
 
@@ -84,16 +104,49 @@ func main() {
 			}
 		}
 
-		resp, err := http.Get(fmt.Sprintf("https://%s/", serverName))
+		if strings.HasPrefix(serverName, "www.") {
+			serverName = serverName[4:]
+		}
+
+		dnsInfo := ""
+
+		projectAddrList, err := net.LookupHost(serverName)
 		if err != nil {
-			fmt.Printf("%s: %s -> ERROR %v\n", project, serverName, err)
+			dnsInfo = fmt.Sprintf(" [DNS issue: %v]", err)
 		} else {
-			fmt.Printf("%s: %s -> %d\n", project, serverName, resp.StatusCode)
+			if !checkAddrsMatch(serverAddrList, projectAddrList) {
+				dnsInfo = " [DNS points to different host]"
+			}
+		}
+
+		resp, err := http.Get(fmt.Sprintf("%s://%s/", protocol, serverName))
+		if err != nil {
+			fmt.Printf("%s: %s -> ERROR %v%s\n", project, serverName, err, dnsInfo)
+		} else {
+			fmt.Printf("%s: %s -> %d%s\n", project, serverName, resp.StatusCode, dnsInfo)
 		}
 	}
 
 	close(commands)
 
+	fmt.Println("All configured projects in alphabetical order:")
+	fmt.Println(strings.Join(projects, ", "))
+}
+
+func checkAddrsMatch(serverAddrList []string, projectAddrList []string) bool {
+	for _, addr := range projectAddrList {
+		found := false
+		for _, serverAddr := range serverAddrList {
+			if serverAddr == addr {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func createSshConfig(username string, keyPath string) *ssh.ClientConfig {
@@ -140,7 +193,7 @@ func runSshCommands(config *ssh.ClientConfig, hostname string, in chan string, o
 		var b bytes.Buffer
 		session.Stdout = &b
 		if err := session.Run(command); err != nil {
-			log.Fatal("Failed to run: " + err.Error())
+			log.Fatalf("Failed to run %s: %v", command, err)
 		}
 		out <- b.String()
 		session.Close()
