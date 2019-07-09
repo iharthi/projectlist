@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
@@ -11,27 +12,54 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"syscall"
 )
 
 func main() {
-	args := os.Args
-	if len(args) != 4 {
-		fmt.Println("Usage: prolist username ssh_key_path server_name")
-		return
+	keyPathPtr := flag.String("key", "", "SSH key path")
+	serverNamePtr := flag.String("host", "", "Hostname to check")
+	serverPortPrt := flag.Int("port", 22, "Port ssh runs on")
+	usernamePtr := flag.String("user", "", "Username to use")
+
+	flag.Parse()
+
+	var username string
+	if usernamePtr == nil || *usernamePtr == "" {
+		var exists bool
+		username, exists = os.LookupEnv("USER")
+		if !exists {
+			log.Fatalf("Username has to be set either as --username or in $USER")
+			return
+		}
+	} else {
+		username = *usernamePtr
 	}
 
-	username := args[1]
-	keyPath := args[2]
-	serverName := args[3]
+	var keyPath string
+	if keyPathPtr == nil || *keyPathPtr == "" {
+		homeDirectory, exists := os.LookupEnv("HOME")
+		if !exists {
+			log.Fatalf("SSH key path has to be set")
+			return
+		}
+		keyPath = path.Join(homeDirectory, ".ssh", "id_rsa")
+	} else {
+		keyPath = *keyPathPtr
+	}
+
+	if serverNamePtr == nil || *serverNamePtr == "" {
+		log.Fatalf("Host has to be set")
+		return
+	}
 
 	sshConfig := createSshConfig(username, keyPath)
 
 	commands := make(chan string, 10)
 	results := make(chan string, 10)
 
-	go runSshCommands(sshConfig, fmt.Sprintf("%s:22", serverName), commands, results)
+	go runSshCommands(sshConfig, fmt.Sprintf("%s:%d", *serverNamePtr, *serverPortPrt), commands, results)
 
 	commands <- "ls /etc/nginx/sites-enabled/"
 	listString := <-results
