@@ -17,7 +17,17 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"gopkg.in/yaml.v2"
 )
+
+type DockerComposeHostEntry struct {
+	Ports []string `yaml:"ports"`
+	Volumes []string `yaml:"volumes"`
+}
+
+type DockerCompose struct {
+	Services map[string]DockerComposeHostEntry `yaml:"services"`
+}
 
 func main() {
 	keyPathPtr := flag.String("key", "", "SSH key path")
@@ -121,15 +131,47 @@ func main() {
 
 		resp, err := http.Get(fmt.Sprintf("%s://%s/", protocol, serverName))
 		if err != nil {
-			fmt.Printf("%s: %s -> ERROR %v%s\n", project, serverName, err, dnsInfo)
+			fmt.Printf("[%s] %s: %s -> ERROR %v%s\n", *serverNamePtr, project, serverName, err, dnsInfo)
 		} else {
-			fmt.Printf("%s: %s -> %d%s\n", project, serverName, resp.StatusCode, dnsInfo)
+			fmt.Printf("[%s] %s: %s -> %d%s\n", *serverNamePtr, project, serverName, resp.StatusCode, dnsInfo)
+		}
+	}
+
+	// Now check for the exposed ports
+	commands <- "ls -d /srv/*/docker-compose.production.yml"
+	listStringSrv := <-results
+	listSrv := strings.Fields(listStringSrv)
+	projectsSrv := make([]string, 0, len(listSrv))
+
+	// Filter the list
+	for _, project := range listSrv {
+		if project == "default" {
+			continue
+		}
+		projectsSrv = append(projectsSrv, project)
+	}
+	sort.Strings(projectsSrv)
+
+	for _, project := range projectsSrv {
+		commands <- fmt.Sprintf("cat %s", project)
+		result := <-results
+
+		var m DockerCompose
+		err := yaml.Unmarshal([]byte(result), &m)
+		if err != nil {
+			fmt.Printf("[%s] ERROR reading %s %v\n", *serverNamePtr, project, err)
+		} else {
+			for serviceName, service := range m.Services {
+				if len(service.Ports) > 0 {
+					fmt.Printf("[%s] %s:%s %s\n", *serverNamePtr, project, serviceName, service.Ports)
+				}
+			}
 		}
 	}
 
 	close(commands)
 
-	fmt.Println("All configured projects in alphabetical order:")
+	fmt.Println("All configured nginx projects in alphabetical order:")
 	fmt.Println(strings.Join(projects, ", "))
 }
 
